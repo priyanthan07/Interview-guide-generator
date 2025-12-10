@@ -1,13 +1,26 @@
 import json
+import logging
 from typing import List, Optional
 from openai import OpenAI
 from .config import settings
-from .schemas import SkillGap, InterviewQuestion
+from .schemas import SkillGap
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class LLMService:
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None
+        self._client = None
+    
+    @property
+    def client(self):
+        """Lazy initialization of OpenAI client - checks API key on each access."""
+        if self._client is None and settings.OPENAI_API_KEY:
+            self._client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            logger.info("OpenAI client initialized successfully")
+        return self._client
     
     def generate_interview_questions(
         self,
@@ -22,13 +35,21 @@ class LLMService:
     ) -> dict:
         """Generate personalized interview questions based on simulation results."""
         
+        # Check if we have an API key
+        if not settings.OPENAI_API_KEY:
+            logger.warning("OPENAI_API_KEY not set - returning mock data")
+            return self._get_mock_response(candidate_name, skill_gaps, num_questions)
+        
         # Format skill gaps for the prompt
-        gaps_text = "\n".join([
-            f"- {gap.skill_name}: Score {gap.current_score}/{gap.required_score} "
-            f"(Gap severity: {gap.gap_severity}, Importance: {gap.importance_to_role})"
-            f"\n  Suggested areas to probe: {', '.join(gap.suggested_probe_areas) if gap.suggested_probe_areas else 'General assessment needed'}"
-            for gap in skill_gaps
-        ])
+        if skill_gaps:
+            gaps_text = "\n".join([
+                f"- {gap.skill_name}: Score {gap.current_score}/{gap.required_score} "
+                f"(Gap severity: {gap.gap_severity}, Importance: {gap.importance_to_role})"
+                f"\n  Suggested areas to probe: {', '.join(gap.suggested_probe_areas) if gap.suggested_probe_areas else 'General assessment needed'}"
+                for gap in skill_gaps
+            ])
+        else:
+            gaps_text = "No specific skill gaps identified - conduct general assessment"
         
         verified_text = ", ".join(verified_skills) if verified_skills else "None identified"
         
@@ -52,7 +73,7 @@ class LLMService:
 {f"## Evaluation Notes from Simulation{chr(10)}{evaluation_rationale}" if evaluation_rationale else ""}
 
 ## Your Task
-Generate {num_questions} targeted interview questions that:
+Generate exactly {num_questions} targeted interview questions that:
 1. Focus primarily on the skill gaps identified
 2. Are appropriate for {interview_type} interviews
 3. Help assess whether gaps are due to lack of knowledge, lack of experience, or just simulation performance
@@ -63,8 +84,8 @@ For each question, provide:
 - The main question
 - Which skill/gap it targets
 - Difficulty level (easy/medium/hard)
-- What good answers should include (what to listen for)
-- Red flags that indicate deeper problems
+- What good answers should include (what to listen for) - provide 2-3 points
+- Red flags that indicate deeper problems - provide 2-3 points
 - 2-3 follow-up questions
 - Estimated time (e.g., "3-5 minutes")
 
@@ -73,7 +94,7 @@ Also provide:
 - Top 3 strengths to acknowledge during the interview
 - Top 3 red flags to watch for overall
 
-Respond in the following JSON format:
+You MUST respond with valid JSON in this exact format:
 {{
     "summary": "Executive summary about the candidate...",
     "strengths": ["strength1", "strength2", "strength3"],
@@ -91,17 +112,15 @@ Respond in the following JSON format:
     ]
 }}"""
 
-        if not self.client:
-            # Return mock data if no API key
-            return self._get_mock_response(candidate_name, skill_gaps, num_questions)
-        
         try:
+            logger.info(f"Calling OpenAI API for candidate: {candidate_name}")
+            
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert technical recruiter and interview coach. Always respond with valid JSON."
+                        "content": "You are an expert technical recruiter and interview coach. You must always respond with valid JSON only, no additional text or markdown."
                     },
                     {
                         "role": "user",
@@ -115,19 +134,35 @@ Respond in the following JSON format:
             
             # Parse JSON from response
             content = response.choices[0].message.content
+            logger.info(f"OpenAI API response received, length: {len(content) if content else 0}")
+            
             if content:
-                return json.loads(content)
+                result = json.loads(content)
+                logger.info(f"Successfully generated {len(result.get('questions', []))} questions")
+                return result
             else:
+                logger.error("OpenAI returned empty content")
                 return self._get_mock_response(candidate_name, skill_gaps, num_questions)
                 
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {e}")
+            logger.error(f"Raw content: {content[:500] if content else 'None'}")
+            return self._get_mock_response(candidate_name, skill_gaps, num_questions)
         except Exception as e:
-            print(f"OpenAI Error: {e}")
+            logger.error(f"OpenAI API Error: {type(e).__name__}: {e}")
             return self._get_mock_response(candidate_name, skill_gaps, num_questions)
     
     def _get_mock_response(self, candidate_name: str, skill_gaps: List[SkillGap], num_questions: int) -> dict:
         """Generate mock response for testing without API key."""
+        logger.info("Generating mock response")
+        
         questions = []
-        for i, gap in enumerate(skill_gaps[:num_questions]):
+        
+        # Generate questions based on skill gaps
+        skill_gap_list = list(skill_gaps) if skill_gaps else []
+        
+        for i in range(min(len(skill_gap_list), num_questions)):
+            gap = skill_gap_list[i]
             questions.append({
                 "question": f"Can you walk me through a specific example where you had to apply {gap.skill_name} in a challenging situation?",
                 "skill_targeted": gap.skill_name,
@@ -151,41 +186,77 @@ Respond in the following JSON format:
             })
         
         # Fill remaining questions with general probing
-        while len(questions) < num_questions:
-            questions.append({
+        general_questions = [
+            {
                 "question": "Tell me about a time you had to learn a new skill quickly to complete a project.",
                 "skill_targeted": "Learning Agility",
                 "difficulty": "medium",
-                "what_to_listen_for": [
-                    "Structured approach to learning",
-                    "Resourcefulness",
-                    "Application of new knowledge"
-                ],
-                "red_flags": [
-                    "Resistance to learning new things",
-                    "Over-reliance on others"
-                ],
-                "follow_up_questions": [
-                    "What resources did you use?",
-                    "How long did it take to become proficient?"
-                ],
+                "what_to_listen_for": ["Structured approach to learning", "Resourcefulness", "Application of new knowledge"],
+                "red_flags": ["Resistance to learning new things", "Over-reliance on others"],
+                "follow_up_questions": ["What resources did you use?", "How long did it take to become proficient?"],
                 "time_estimate": "3-4 minutes"
-            })
+            },
+            {
+                "question": "Describe a situation where you received critical feedback. How did you handle it?",
+                "skill_targeted": "Receiving Feedback",
+                "difficulty": "medium",
+                "what_to_listen_for": ["Openness to feedback", "Concrete actions taken", "Growth mindset"],
+                "red_flags": ["Defensiveness", "Blaming others", "No follow-through"],
+                "follow_up_questions": ["What specific changes did you make?", "How did you measure improvement?"],
+                "time_estimate": "3-4 minutes"
+            },
+            {
+                "question": "Tell me about a project that didn't go as planned. What happened and what did you learn?",
+                "skill_targeted": "Problem Solving",
+                "difficulty": "medium",
+                "what_to_listen_for": ["Ownership of mistakes", "Root cause analysis", "Lessons learned"],
+                "red_flags": ["No accountability", "Superficial analysis", "Repeated same mistakes"],
+                "follow_up_questions": ["What would you do differently?", "How did you communicate the setback?"],
+                "time_estimate": "4-5 minutes"
+            },
+            {
+                "question": "How do you prioritize tasks when you have multiple deadlines?",
+                "skill_targeted": "Time Management",
+                "difficulty": "easy",
+                "what_to_listen_for": ["Clear prioritization framework", "Communication with stakeholders", "Flexibility"],
+                "red_flags": ["No clear system", "Overcommitting", "Poor communication"],
+                "follow_up_questions": ["Give me a specific example", "How do you handle unexpected urgent tasks?"],
+                "time_estimate": "3-4 minutes"
+            },
+            {
+                "question": "Describe a time when you had to collaborate with someone difficult to work with.",
+                "skill_targeted": "Collaboration",
+                "difficulty": "medium",
+                "what_to_listen_for": ["Empathy and understanding", "Conflict resolution skills", "Focus on outcomes"],
+                "red_flags": ["Badmouthing colleagues", "Avoidance", "Escalating conflicts"],
+                "follow_up_questions": ["What was the outcome?", "What did you learn about yourself?"],
+                "time_estimate": "4-5 minutes"
+            }
+        ]
+        
+        while len(questions) < num_questions and general_questions:
+            questions.append(general_questions.pop(0))
+        
+        # Ensure we have exactly num_questions
+        questions = questions[:num_questions]
+        
+        gap_names = [g.skill_name for g in skill_gap_list[:2]] if skill_gap_list else ["key areas"]
         
         return {
-            "summary": f"{candidate_name} showed strong performance in verified areas but has notable gaps in {', '.join([g.skill_name for g in skill_gaps[:2]])}. The interview should focus on understanding whether these gaps reflect actual skill deficiencies or situational factors during the simulation.",
+            "summary": f"{candidate_name} showed performance in the simulation with areas that warrant deeper exploration. The interview should focus on understanding their experience with {', '.join(gap_names)} and assessing whether any gaps reflect actual skill deficiencies or situational factors.",
             "strengths": [
-                "Demonstrated competency in core technical skills",
-                "Good communication during simulation",
-                "Showed problem-solving initiative"
+                "Completed the simulation assessment",
+                "Demonstrated engagement with the process",
+                "Showed willingness to be evaluated"
             ],
             "red_flags": [
-                f"Significant gap in {skill_gaps[0].skill_name if skill_gaps else 'key areas'}",
-                "May need additional training in certain areas",
-                "Verify depth of experience"
+                f"Gaps identified in {gap_names[0]}" if gap_names else "Limited data from simulation",
+                "May need to probe depth of experience",
+                "Verify practical application of skills"
             ],
-            "questions": questions[:num_questions]
+            "questions": questions
         }
 
 
+# Create singleton instance
 llm_service = LLMService()
