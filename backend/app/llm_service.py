@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from openai import OpenAI
 from .config import settings
 from .schemas import SkillGap
@@ -22,6 +22,444 @@ class LLMService:
             logger.info("OpenAI client initialized successfully")
         return self._client
     
+    def generate_agentic_guide(
+        self,
+        candidate_name: str,
+        role: str,
+        job_description: str,
+        verified_skills: List[Dict[str, Any]],
+        skill_gaps: List[Dict[str, Any]],
+        skills_not_tested: List[Dict[str, Any]],
+        evaluation_evidence: List[Dict[str, Any]],
+        feedback_summary: Optional[Dict[str, Any]] = None,
+        voice_summary: Optional[Dict[str, Any]] = None,
+        custom_instructions: Optional[str] = None,
+        num_questions: int = 8,
+        scenario_type: Optional[str] = None
+    ) -> dict:
+        """
+        Generate agentic interview guide with chain-of-thought reasoning.
+        
+        This method performs step-by-step reasoning to:
+        1. Analyze evaluation evidence for each skill
+        2. Determine significance of gaps relative to job requirements
+        3. Generate targeted questions with full reasoning chains
+        4. Include specific evidence citations from simulation data
+        """
+        
+        # Check if we have an API key
+        if not settings.OPENAI_API_KEY:
+            logger.warning("OPENAI_API_KEY not set - returning mock agentic response")
+            return self._get_mock_agentic_response(
+                candidate_name, verified_skills, skill_gaps, 
+                skills_not_tested, num_questions
+            )
+        
+        # Build the evidence context
+        evidence_text = self._format_evidence(evaluation_evidence)
+        verified_text = self._format_verified_skills(verified_skills)
+        gaps_text = self._format_skill_gaps(skill_gaps)
+        not_tested_text = self._format_not_tested_skills(skills_not_tested)
+        feedback_text = self._format_feedback(feedback_summary)
+        voice_text = self._format_voice_summary(voice_summary)
+        
+        # Build the comprehensive prompt
+        prompt = f"""You are an expert interview strategist using chain-of-thought reasoning to generate a highly targeted, evidence-based interview guide.
+
+## CANDIDATE CONTEXT
+- **Name**: {candidate_name}
+- **Role Applied**: {role}
+- **Simulation Type**: {scenario_type or "General Assessment"}
+
+## JOB DESCRIPTION
+{job_description}
+
+## EVALUATION EVIDENCE FROM SIMULATION
+{evidence_text}
+
+## SKILL CLASSIFICATION RESULTS
+
+### VERIFIED SKILLS (Score >= 4/5)
+{verified_text}
+
+### SKILL GAPS (Score < 4/5 - Need probing)
+{gaps_text}
+
+### SKILLS NOT TESTED IN SIMULATION (Required by job but not evaluated)
+{not_tested_text}
+
+{f"## FEEDBACK SUMMARY{chr(10)}{feedback_text}" if feedback_text else ""}
+
+{f"## VOICE/COMMUNICATION ASSESSMENT{chr(10)}{voice_text}" if voice_text else ""}
+
+{f"## RECRUITER CUSTOM INSTRUCTIONS{chr(10)}{custom_instructions}" if custom_instructions else ""}
+
+---
+
+## YOUR TASK: Generate an Agentic Interview Guide
+
+For this interview guide, you must:
+
+1. **SECTION 1 - VERIFIED SKILLS**: For each verified skill, provide ONE brief acknowledgment question that can be asked in 1 minute or less. The goal is to confirm, not deeply probe.
+
+2. **SECTION 2 - SKILL GAPS**: For each skill gap, perform chain-of-thought reasoning:
+   - **Data Observation**: What specific score/evidence do we have?
+   - **Evidence from Transcript/Feedback**: Quote or cite specific observations
+   - **Gap Significance**: Why does this matter for THIS specific role?
+   - **Interview Strategy**: What approach will reveal true capability vs. simulation performance?
+   - **Question Rationale**: Why is this specific question the right one to ask?
+   
+   Then generate 1-2 targeted questions per gap with:
+   - The question text (behavioral/situational)
+   - What to listen for (3 specific indicators)
+   - Red flags (2-3 warning signs)
+   - Follow-up questions (2-3 probing questions)
+
+3. **SECTION 3 - SKILLS NOT TESTED**: For each skill required by the job but not tested in simulation:
+   - **Note**: Acknowledge it wasn't tested
+   - **Relevance to Role**: Why this skill matters for the job
+   - **Question Strategy**: Standard behavioral assessment approach
+   
+   Generate 1 question per untested skill.
+
+4. **EXECUTIVE SUMMARY**: 3-4 sentences synthesizing the candidate's profile and interview focus areas.
+
+Generate EXACTLY {num_questions} questions total, distributed appropriately across sections.
+
+You MUST respond with valid JSON in this exact format:
+{{
+    "executive_summary": "3-4 sentence synthesis of candidate profile and interview strategy...",
+    "interview_duration_estimate": "30-45 minutes",
+    "sections": {{
+        "verified_skills": [
+            {{
+                "skill_name": "Skill Name",
+                "score": 4.5,
+                "acknowledgment_question": "Brief question to confirm this skill...",
+                "time_estimate": "1 minute"
+            }}
+        ],
+        "skill_gaps": [
+            {{
+                "skill_name": "Skill Name",
+                "current_score": 2,
+                "priority": "high",
+                "reasoning": {{
+                    "data_observation": "Scored 2/5 in EMAIL_CONVERSATION simulation",
+                    "evidence_from_evaluation": "User responses lacked context...",
+                    "gap_significance": "Critical for role - daily client communication required",
+                    "interview_strategy": "Behavioral questions to assess real-world application",
+                    "question_rationale": "STAR format to elicit concrete examples"
+                }},
+                "questions": [
+                    {{
+                        "question": "The interview question text...",
+                        "what_to_listen_for": ["indicator1", "indicator2", "indicator3"],
+                        "red_flags": ["warning1", "warning2"],
+                        "follow_ups": ["follow_up1", "follow_up2"],
+                        "time_estimate": "4-5 minutes"
+                    }}
+                ]
+            }}
+        ],
+        "skills_not_tested": [
+            {{
+                "skill_name": "Skill Name",
+                "priority": "medium",
+                "reasoning": {{
+                    "note": "This skill was not evaluated in simulation",
+                    "relevance_to_role": "Important because...",
+                    "question_strategy": "Standard behavioral assessment"
+                }},
+                "question": {{
+                    "question": "The interview question text...",
+                    "what_to_listen_for": ["indicator1", "indicator2", "indicator3"],
+                    "red_flags": ["warning1", "warning2"],
+                    "follow_ups": ["follow_up1", "follow_up2"],
+                    "time_estimate": "4-5 minutes"
+                }}
+            }}
+        ]
+    }},
+    "overall_red_flags": ["Overall concern 1", "Overall concern 2"],
+    "overall_strengths": ["Strength 1", "Strength 2", "Strength 3"],
+    "interview_tips": ["Tip 1 for conducting this interview", "Tip 2"]
+}}"""
+
+        try:
+            logger.info(f"Generating agentic guide for candidate: {candidate_name}")
+            
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """You are an expert interview strategist who uses chain-of-thought reasoning to create highly targeted, evidence-based interview guides. 
+
+Your guides are known for:
+1. Citing specific evidence from evaluation data
+2. Clear reasoning chains that justify each question
+3. Practical, actionable interview guidance
+4. Balancing thorough assessment with time efficiency
+
+You must always respond with valid JSON only, no additional text or markdown."""
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                max_tokens=6000,
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            
+            content = response.choices[0].message.content
+            logger.info(f"Agentic guide response received, length: {len(content) if content else 0}")
+            
+            if content:
+                result = json.loads(content)
+                logger.info(f"Successfully generated agentic guide with {self._count_questions(result)} questions")
+                return result
+            else:
+                logger.error("OpenAI returned empty content for agentic guide")
+                return self._get_mock_agentic_response(
+                    candidate_name, verified_skills, skill_gaps,
+                    skills_not_tested, num_questions
+                )
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error in agentic guide: {e}")
+            return self._get_mock_agentic_response(
+                candidate_name, verified_skills, skill_gaps,
+                skills_not_tested, num_questions
+            )
+        except Exception as e:
+            logger.error(f"OpenAI API Error in agentic guide: {type(e).__name__}: {e}")
+            return self._get_mock_agentic_response(
+                candidate_name, verified_skills, skill_gaps,
+                skills_not_tested, num_questions
+            )
+    
+    def _format_evidence(self, evidence: List[Dict]) -> str:
+        """Format evaluation evidence for the prompt."""
+        if not evidence:
+            return "No evaluation evidence available."
+        
+        lines = []
+        for e in evidence:
+            lines.append(f"- **{e.get('skill_name', 'Unknown')}**: Score {e.get('score', 'N/A')}/5")
+            if e.get('reason'):
+                lines.append(f"  Reason: {e['reason'][:200]}...")
+            if e.get('transcript_snippet'):
+                lines.append(f"  Transcript: \"{e['transcript_snippet'][:150]}...\"")
+            if e.get('is_required'):
+                lines.append(f"  Priority: {e.get('priority', 'medium').upper()}")
+        return "\n".join(lines)
+    
+    def _format_verified_skills(self, skills: List[Dict]) -> str:
+        """Format verified skills for the prompt."""
+        if not skills:
+            return "No skills verified at 4+ level."
+        
+        lines = []
+        for s in skills:
+            lines.append(f"- {s.get('skill_name', 'Unknown')}: Score {s.get('score', 'N/A')}/5")
+            if s.get('evidence'):
+                lines.append(f"  Evidence: {s['evidence'][:150]}")
+        return "\n".join(lines)
+    
+    def _format_skill_gaps(self, gaps: List[Dict]) -> str:
+        """Format skill gaps for the prompt."""
+        if not gaps:
+            return "No significant skill gaps identified."
+        
+        lines = []
+        for g in gaps:
+            lines.append(f"- **{g.get('skill_name', 'Unknown')}**: Score {g.get('current_score', 'N/A')}/5 (Required: {g.get('required_score', 4)})")
+            lines.append(f"  Severity: {g.get('gap_severity', 'unknown').upper()}, Priority: {g.get('priority', 'medium').upper()}")
+            if g.get('evidence'):
+                lines.append(f"  Evidence: {g['evidence'][:150]}")
+            if g.get('transcript_snippet'):
+                lines.append(f"  From transcript: \"{g['transcript_snippet'][:100]}...\"")
+        return "\n".join(lines)
+    
+    def _format_not_tested_skills(self, skills: List[Dict]) -> str:
+        """Format skills not tested for the prompt."""
+        if not skills:
+            return "All required skills were tested in simulation."
+        
+        lines = []
+        for s in skills:
+            lines.append(f"- {s.get('skill_name', 'Unknown')}: Priority {s.get('priority', 'medium').upper()}")
+            if s.get('reason'):
+                lines.append(f"  Note: {s['reason']}")
+        return "\n".join(lines)
+    
+    def _format_feedback(self, feedback: Optional[Dict]) -> str:
+        """Format feedback summary for the prompt."""
+        if not feedback:
+            return ""
+        
+        lines = []
+        strengths = feedback.get('key_strengths', [])
+        for s in strengths:
+            if isinstance(s, dict):
+                lines.append(f"- **{s.get('title', 'Strength')}**: {s.get('detail', '')[:100]}")
+        return "\n".join(lines) if lines else ""
+    
+    def _format_voice_summary(self, voice: Optional[Dict]) -> str:
+        """Format voice evaluation summary for the prompt."""
+        if not voice:
+            return ""
+        
+        lines = []
+        elsa = voice.get('elsa_score', {})
+        if elsa:
+            lines.append(f"- Pronunciation CEFR: {elsa.get('pronunciation_cefr', 'N/A')}")
+            lines.append(f"- Fluency CEFR: {elsa.get('fluency_cefr', 'N/A')}")
+            lines.append(f"- Grammar CEFR: {elsa.get('grammar_cefr', 'N/A')}")
+            lines.append(f"- Overall CEFR: {elsa.get('overall_cefr', 'N/A')}")
+        
+        attributes = voice.get('attributes', [])
+        for attr in attributes[:3]:
+            if isinstance(attr, dict):
+                lines.append(f"- {attr.get('attribute', 'N/A')}: {attr.get('reasoning', '')[:100]}")
+        
+        return "\n".join(lines) if lines else ""
+    
+    def _count_questions(self, result: Dict) -> int:
+        """Count total questions in the generated guide."""
+        count = 0
+        sections = result.get('sections', {})
+        
+        # Count verified skill acknowledgment questions
+        count += len(sections.get('verified_skills', []))
+        
+        # Count skill gap questions
+        for gap in sections.get('skill_gaps', []):
+            count += len(gap.get('questions', []))
+        
+        # Count not tested skill questions
+        count += len(sections.get('skills_not_tested', []))
+        
+        return count
+    
+    def _get_mock_agentic_response(
+        self,
+        candidate_name: str,
+        verified_skills: List[Dict],
+        skill_gaps: List[Dict],
+        skills_not_tested: List[Dict],
+        num_questions: int
+    ) -> dict:
+        """Generate mock agentic response for testing without API key."""
+        logger.info("Generating mock agentic response")
+        
+        # Build verified skills section
+        verified_section = []
+        for skill in verified_skills[:3]:
+            verified_section.append({
+                "skill_name": skill.get('skill_name', 'Unknown Skill'),
+                "score": skill.get('score', 4),
+                "acknowledgment_question": f"I noticed you demonstrated strong {skill.get('skill_name', 'skills')} in the simulation. Can you briefly share what approach you typically take?",
+                "time_estimate": "1 minute"
+            })
+        
+        # Build skill gaps section with reasoning
+        gaps_section = []
+        for gap in skill_gaps[:3]:
+            gaps_section.append({
+                "skill_name": gap.get('skill_name', 'Unknown Skill'),
+                "current_score": gap.get('current_score', 2),
+                "priority": gap.get('priority', 'medium'),
+                "reasoning": {
+                    "data_observation": f"Scored {gap.get('current_score', 2)}/5 in simulation assessment",
+                    "evidence_from_evaluation": gap.get('evidence', 'Performance below expected threshold')[:150],
+                    "gap_significance": f"This skill is {gap.get('priority', 'important')} for the role",
+                    "interview_strategy": "Use behavioral questions to assess real-world application",
+                    "question_rationale": "STAR format questions will help reveal actual experience depth"
+                },
+                "questions": [
+                    {
+                        "question": f"Tell me about a specific situation where you had to apply {gap.get('skill_name', 'this skill')} under pressure. What was the context, and what approach did you take?",
+                        "what_to_listen_for": [
+                            "Specific, detailed example with context",
+                            "Clear problem-solving approach",
+                            "Measurable outcomes or results"
+                        ],
+                        "red_flags": [
+                            "Vague or hypothetical answers",
+                            "Blaming others for failures",
+                            "Cannot articulate specific actions taken"
+                        ],
+                        "follow_ups": [
+                            "What was the outcome?",
+                            "What would you do differently now?",
+                            "How did you measure success?"
+                        ],
+                        "time_estimate": "4-5 minutes"
+                    }
+                ]
+            })
+        
+        # Build not tested section
+        not_tested_section = []
+        for skill in skills_not_tested[:2]:
+            not_tested_section.append({
+                "skill_name": skill.get('skill_name', 'Unknown Skill'),
+                "priority": skill.get('priority', 'medium'),
+                "reasoning": {
+                    "note": "This skill was not evaluated in the simulation",
+                    "relevance_to_role": "This skill is required based on job description",
+                    "question_strategy": "Standard behavioral assessment approach"
+                },
+                "question": {
+                    "question": f"Describe a time when you had to demonstrate {skill.get('skill_name', 'this skill')} in a professional setting.",
+                    "what_to_listen_for": [
+                        "Clear understanding of the skill",
+                        "Relevant experience examples",
+                        "Positive outcomes"
+                    ],
+                    "red_flags": [
+                        "No relevant experience",
+                        "Misunderstanding of skill requirements"
+                    ],
+                    "follow_ups": [
+                        "How did you develop this skill?",
+                        "What challenges did you face?"
+                    ],
+                    "time_estimate": "4-5 minutes"
+                }
+            })
+        
+        gap_names = [g.get('skill_name', 'key area') for g in skill_gaps[:2]]
+        
+        return {
+            "executive_summary": f"{candidate_name} demonstrated mixed performance in the simulation assessment. Strong performance was noted in verified skill areas, while gaps in {', '.join(gap_names) if gap_names else 'certain areas'} warrant deeper exploration during the interview. Focus on behavioral questions to distinguish between simulation performance and actual capability.",
+            "interview_duration_estimate": "30-40 minutes",
+            "sections": {
+                "verified_skills": verified_section,
+                "skill_gaps": gaps_section,
+                "skills_not_tested": not_tested_section
+            },
+            "overall_red_flags": [
+                f"Performance gaps in {gap_names[0]}" if gap_names else "Limited simulation data",
+                "Verify depth of practical experience",
+                "Assess learning agility and adaptability"
+            ],
+            "overall_strengths": [
+                "Completed simulation assessment",
+                "Demonstrated engagement with evaluation process",
+                "Shows willingness to be assessed"
+            ],
+            "interview_tips": [
+                "Start with verified skills to build rapport before probing gaps",
+                "Use silence after questions to encourage elaboration",
+                "Take notes on specific examples provided for reference checks"
+            ]
+        }
+    
     def generate_interview_questions(
         self,
         candidate_name: str,
@@ -33,7 +471,7 @@ class LLMService:
         num_questions: int = 8,
         interview_type: str = "technical"
     ) -> dict:
-        """Generate personalized interview questions based on simulation results."""
+        """Generate personalized interview questions based on simulation results (legacy method)."""
         
         # Check if we have an API key
         if not settings.OPENAI_API_KEY:
