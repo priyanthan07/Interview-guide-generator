@@ -100,7 +100,7 @@ class LLMService:
 
 For this interview guide, you must:
 
-1. **SECTION 1 - VERIFIED SKILLS**: For each verified skill, provide ONE brief acknowledgment question that can be asked in 1 minute or less. The goal is to confirm, not deeply probe.
+1. **SECTION 1 - VERIFIED SKILLS**: For each verified skill (score 4+), provide a brief acknowledgment statement. These are NOT counted toward the num_questions target - they are quick confirmations only.
 
 2. **SECTION 2 - SKILL GAPS**: For each skill gap, perform chain-of-thought reasoning:
    - **Data Observation**: What specific score/evidence do we have?
@@ -124,7 +124,7 @@ For this interview guide, you must:
 
 4. **EXECUTIVE SUMMARY**: 3-4 sentences synthesizing the candidate's profile and interview focus areas.
 
-Generate EXACTLY {num_questions} questions total, distributed appropriately across sections.
+Generate EXACTLY {num_questions} questions total from SKILL GAPS and SKILLS NOT TESTED sections only. Verified skills receive acknowledgments, NOT questions, and do NOT count toward this target.
 
 You MUST respond with valid JSON in this exact format:
 {{
@@ -135,7 +135,7 @@ You MUST respond with valid JSON in this exact format:
             {{
                 "skill_name": "Skill Name",
                 "score": 4.5,
-                "acknowledgment_question": "Brief question to confirm this skill...",
+                "acknowledgment": "Brief acknowledgment statement for this verified skill...",
                 "time_estimate": "1 minute"
             }}
         ],
@@ -312,19 +312,19 @@ You MUST respond with valid JSON in this exact format:
         return "\n".join(lines) if lines else ""
     
     def _count_questions(self, result: Dict) -> int:
-        """Count total questions in the generated guide."""
+        """Count total questions in the generated guide (excluding verified skills - they are acknowledgments only)."""
         count = 0
         sections = result.get('sections', {})
         
-        # Count verified skill acknowledgment questions
-        count += len(sections.get('verified_skills', []))
-        
-        # Count skill gap questions
+        # DO NOT count verified skills - they are acknowledgments, not questions
+        # Only count skill gap questions
         for gap in sections.get('skill_gaps', []):
             count += len(gap.get('questions', []))
         
         # Count not tested skill questions
-        count += len(sections.get('skills_not_tested', []))
+        for skill in sections.get('skills_not_tested', []):
+            if skill.get('question'):
+                count += 1
         
         return count
     
@@ -491,14 +491,11 @@ Respond with valid JSON in this format:
 Generate EXACTLY {needed} questions. No more, no less."""
     
     def _extract_existing_questions(self, result: Dict[str, Any]) -> List[str]:
-        """Extract all existing question texts from a guide result."""
+        """Extract all existing question texts from a guide result (excludes verified skill acknowledgments)."""
         questions = []
         sections = result.get("sections", {})
         
-        # From verified skills
-        for skill in sections.get("verified_skills", []):
-            if skill.get("acknowledgment_question"):
-                questions.append(skill["acknowledgment_question"])
+        # DO NOT extract from verified skills - they are acknowledgments, not questions
         
         # From skill gaps
         for gap in sections.get("skill_gaps", []):
@@ -551,8 +548,11 @@ Generate EXACTLY {needed} questions. No more, no less."""
                 })
     
     def _trim_questions(self, sections: Dict[str, Any], target: int) -> None:
-        """Trim questions down to the target count, preserving structure."""
+        """Trim questions down to the target count, preserving structure. Verified skills are always preserved (they don't count toward target)."""
         remaining = target
+        
+        # ALWAYS preserve verified skills - they are acknowledgments, not questions
+        # They don't count toward the target
         
         # Keep skill gap questions first (they carry the most depth)
         trimmed_gaps = []
@@ -578,12 +578,6 @@ Generate EXACTLY {needed} questions. No more, no less."""
             sections["skills_not_tested"] = kept_not_tested
         else:
             sections["skills_not_tested"] = []
-        
-        # Finally keep verified skills acknowledgements (1 each)
-        if remaining > 0:
-            sections["verified_skills"] = sections.get("verified_skills", [])[:remaining]
-        else:
-            sections["verified_skills"] = []
     
     def _get_mock_agentic_response(
         self,
@@ -602,7 +596,7 @@ Generate EXACTLY {needed} questions. No more, no less."""
             verified_section.append({
                 "skill_name": skill.get('skill_name', 'Unknown Skill'),
                 "score": skill.get('score', 4),
-                "acknowledgment_question": f"I noticed you demonstrated strong {skill.get('skill_name', 'skills')} in the simulation. Can you briefly share what approach you typically take?",
+                "acknowledgment": f"Strong performance in {skill.get('skill_name', 'this skill')} - demonstrated competency in simulation.",
                 "time_estimate": "1 minute"
             })
         

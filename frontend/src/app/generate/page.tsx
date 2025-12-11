@@ -735,7 +735,7 @@ function GuideDisplay({
                     Score: {skill.score}/5
                   </span>
                 </div>
-                <p className="text-slate-600 text-sm italic">"{skill.acknowledgment_question}"</p>
+                <p className="text-slate-600 text-sm italic">"{skill.acknowledgment || skill.acknowledgment_question}"</p>
                 <p className="text-xs text-slate-400 mt-1">⏱ {skill.time_estimate}</p>
               </div>
             ))}

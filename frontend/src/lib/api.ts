@@ -130,7 +130,8 @@ export interface AgenticGuideRequest {
 export interface VerifiedSkillSection {
   skill_name: string;
   score: number;
-  acknowledgment_question: string;
+  acknowledgment?: string;
+  acknowledgment_question?: string; // Fallback for backwards compatibility
   time_estimate: string;
 }
 
