@@ -19,6 +19,11 @@ export interface Campaign {
   last_activity: string | null;
 }
 
+export interface SkillScore {
+  skill: string;
+  score: number | null;
+}
+
 export interface CampaignCandidate {
   email: string;
   name: string;
@@ -29,6 +34,7 @@ export interface CampaignCandidate {
   session_ids: string[];
   latest_session_id: string | null;
   skills_evaluated: string[];
+  skill_scores: SkillScore[];
   average_score: number | null;
 }
 
@@ -117,6 +123,7 @@ export interface AgenticGuideRequest {
   job_description: string;
   required_skills: SkillRequirement[];
   custom_instructions?: string;
+  per_candidate_instructions?: Record<string, string>;  // session_id -> instruction
   num_questions: number;
 }
 
@@ -252,6 +259,28 @@ export const api = {
   // Agentic Interview Guide Generation
   generateAgenticGuide: (request: AgenticGuideRequest) =>
     fetchAPI<AgenticGuideResponse>('/evaluations/generate-agentic-guide', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    }),
+  
+  // Regenerate single question
+  regenerateQuestion: (request: {
+    original_question: string;
+    skill_name: string;
+    instruction?: string;
+    candidate_context?: string;
+  }) =>
+    fetchAPI<{
+      success: boolean;
+      regenerated_question?: {
+        question: string;
+        what_to_listen_for: string[];
+        red_flags: string[];
+        follow_ups: string[];
+        time_estimate: string;
+      };
+      error?: string;
+    }>('/evaluations/regenerate-question', {
       method: 'POST',
       body: JSON.stringify(request),
     }),

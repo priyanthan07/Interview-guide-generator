@@ -187,42 +187,25 @@ You MUST respond with valid JSON in this exact format:
 }}"""
 
         try:
-            logger.info(f"Generating agentic guide for candidate: {candidate_name}")
+            logger.info(f"Generating agentic guide for candidate: {candidate_name}, target questions: {num_questions}")
             
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are an expert interview strategist who uses chain-of-thought reasoning to create highly targeted, evidence-based interview guides. 
-
-Your guides are known for:
-1. Citing specific evidence from evaluation data
-2. Clear reasoning chains that justify each question
-3. Practical, actionable interview guidance
-4. Balancing thorough assessment with time efficiency
-
-You must always respond with valid JSON only, no additional text or markdown."""
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=6000,
-                temperature=0.7,
-                response_format={"type": "json_object"}
+            # Use iterative approach to ensure exact question count
+            result = self._generate_guide_iteratively(
+                prompt=prompt,
+                num_questions=num_questions,
+                candidate_name=candidate_name,
+                role=role,
+                job_description=job_description,
+                skill_gaps=skill_gaps,
+                skills_not_tested=skills_not_tested,
+                scenario_type=scenario_type
             )
             
-            content = response.choices[0].message.content
-            logger.info(f"Agentic guide response received, length: {len(content) if content else 0}")
-            
-            if content:
-                result = json.loads(content)
+            if result:
                 logger.info(f"Successfully generated agentic guide with {self._count_questions(result)} questions")
                 return result
             else:
-                logger.error("OpenAI returned empty content for agentic guide")
+                logger.error("Failed to generate guide after iterations")
                 return self._get_mock_agentic_response(
                     candidate_name, verified_skills, skill_gaps,
                     skills_not_tested, num_questions
@@ -344,6 +327,263 @@ You must always respond with valid JSON only, no additional text or markdown."""
         count += len(sections.get('skills_not_tested', []))
         
         return count
+    
+    def _generate_guide_iteratively(
+        self,
+        prompt: str,
+        num_questions: int,
+        candidate_name: str,
+        role: str,
+        job_description: str,
+        skill_gaps: List[Dict[str, Any]],
+        skills_not_tested: List[Dict[str, Any]],
+        scenario_type: Optional[str] = None,
+        max_iterations: int = 3
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Generate interview guide iteratively, calling LLM again if needed to reach target question count.
+        
+        This approach ensures the LLM generates all required questions rather than using fallback templates.
+        """
+        system_message = """You are an expert interview strategist who uses chain-of-thought reasoning to create highly targeted, evidence-based interview guides. 
+
+Your guides are known for:
+1. Citing specific evidence from evaluation data
+2. Clear reasoning chains that justify each question
+3. Practical, actionable interview guidance
+4. Balancing thorough assessment with time efficiency
+
+You must always respond with valid JSON only, no additional text or markdown."""
+
+        # First iteration - generate initial guide
+        response = self.client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=6000,
+            temperature=0.7,
+            response_format={"type": "json_object"}
+        )
+        
+        content = response.choices[0].message.content
+        if not content:
+            return None
+        
+        result = json.loads(content)
+        current_count = self._count_questions(result)
+        logger.info(f"Initial generation: {current_count}/{num_questions} questions")
+        
+        # If we have more than needed, trim
+        if current_count > num_questions:
+            self._trim_questions(result.get("sections", {}), num_questions)
+            return result
+        
+        # If we have exact count, return
+        if current_count == num_questions:
+            return result
+        
+        # Iteratively generate more questions until we reach the target
+        for iteration in range(max_iterations):
+            needed = num_questions - self._count_questions(result)
+            if needed <= 0:
+                break
+            
+            logger.info(f"Iteration {iteration + 1}: Need {needed} more questions")
+            
+            # Build prompt for additional questions
+            additional_prompt = self._build_additional_questions_prompt(
+                candidate_name=candidate_name,
+                role=role,
+                job_description=job_description,
+                skill_gaps=skill_gaps,
+                skills_not_tested=skills_not_tested,
+                existing_questions=self._extract_existing_questions(result),
+                needed=needed,
+                scenario_type=scenario_type
+            )
+            
+            # Call LLM for additional questions
+            additional_response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": additional_prompt}
+                ],
+                max_tokens=4000,
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            
+            additional_content = additional_response.choices[0].message.content
+            if additional_content:
+                additional_result = json.loads(additional_content)
+                self._merge_additional_questions(result, additional_result)
+                logger.info(f"After iteration {iteration + 1}: {self._count_questions(result)} questions")
+        
+        # Final trim if we overshot
+        final_count = self._count_questions(result)
+        if final_count > num_questions:
+            self._trim_questions(result.get("sections", {}), num_questions)
+        
+        return result
+    
+    def _build_additional_questions_prompt(
+        self,
+        candidate_name: str,
+        role: str,
+        job_description: str,
+        skill_gaps: List[Dict[str, Any]],
+        skills_not_tested: List[Dict[str, Any]],
+        existing_questions: List[str],
+        needed: int,
+        scenario_type: Optional[str] = None
+    ) -> str:
+        """Build prompt to generate additional questions."""
+        gaps_text = self._format_skill_gaps(skill_gaps)
+        not_tested_text = self._format_not_tested_skills(skills_not_tested)
+        existing_text = "\n".join([f"- {q}" for q in existing_questions]) if existing_questions else "None yet"
+        
+        return f"""You are generating ADDITIONAL interview questions for a candidate.
+
+## CONTEXT
+- **Candidate**: {candidate_name}
+- **Role**: {role}
+- **Simulation Type**: {scenario_type or "General Assessment"}
+
+## JOB DESCRIPTION
+{job_description}
+
+## SKILL GAPS TO PROBE
+{gaps_text}
+
+## SKILLS NOT TESTED
+{not_tested_text}
+
+## EXISTING QUESTIONS (DO NOT REPEAT THESE)
+{existing_text}
+
+## YOUR TASK
+Generate EXACTLY {needed} NEW interview questions that:
+1. Are DIFFERENT from the existing questions listed above
+2. Target the skill gaps or untested skills
+3. Use behavioral/situational format (STAR method)
+4. Include what to listen for, red flags, and follow-ups
+
+Respond with valid JSON in this format:
+{{
+    "additional_questions": [
+        {{
+            "skill_name": "The skill this question targets",
+            "priority": "high/medium/low",
+            "question": {{
+                "question": "The interview question text...",
+                "what_to_listen_for": ["indicator1", "indicator2", "indicator3"],
+                "red_flags": ["warning1", "warning2"],
+                "follow_ups": ["follow_up1", "follow_up2"],
+                "time_estimate": "4-5 minutes"
+            }}
+        }}
+    ]
+}}
+
+Generate EXACTLY {needed} questions. No more, no less."""
+    
+    def _extract_existing_questions(self, result: Dict[str, Any]) -> List[str]:
+        """Extract all existing question texts from a guide result."""
+        questions = []
+        sections = result.get("sections", {})
+        
+        # From verified skills
+        for skill in sections.get("verified_skills", []):
+            if skill.get("acknowledgment_question"):
+                questions.append(skill["acknowledgment_question"])
+        
+        # From skill gaps
+        for gap in sections.get("skill_gaps", []):
+            for q in gap.get("questions", []):
+                if q.get("question"):
+                    questions.append(q["question"])
+        
+        # From skills not tested
+        for skill in sections.get("skills_not_tested", []):
+            question_obj = skill.get("question", {})
+            if isinstance(question_obj, dict) and question_obj.get("question"):
+                questions.append(question_obj["question"])
+        
+        return questions
+    
+    def _merge_additional_questions(self, result: Dict[str, Any], additional: Dict[str, Any]) -> None:
+        """Merge additional questions into the result, adding to skill_gaps section."""
+        sections = result.setdefault("sections", {})
+        sections.setdefault("skill_gaps", [])
+        
+        additional_questions = additional.get("additional_questions", [])
+        
+        for item in additional_questions:
+            skill_name = item.get("skill_name", "General")
+            question_data = item.get("question", {})
+            
+            # Find existing gap with this skill name or create new one
+            existing_gap = None
+            for gap in sections["skill_gaps"]:
+                if gap.get("skill_name", "").lower() == skill_name.lower():
+                    existing_gap = gap
+                    break
+            
+            if existing_gap:
+                existing_gap.setdefault("questions", []).append(question_data)
+            else:
+                # Create new skill gap entry
+                sections["skill_gaps"].append({
+                    "skill_name": skill_name,
+                    "current_score": 0,
+                    "priority": item.get("priority", "medium"),
+                    "reasoning": {
+                        "data_observation": "Additional probing question",
+                        "evidence_from_evaluation": "Generated to meet interview coverage requirements",
+                        "gap_significance": "Important for comprehensive assessment",
+                        "interview_strategy": "Behavioral assessment",
+                        "question_rationale": "Ensures thorough evaluation of candidate"
+                    },
+                    "questions": [question_data]
+                })
+    
+    def _trim_questions(self, sections: Dict[str, Any], target: int) -> None:
+        """Trim questions down to the target count, preserving structure."""
+        remaining = target
+        
+        # Keep skill gap questions first (they carry the most depth)
+        trimmed_gaps = []
+        for gap in sections.get("skill_gaps", []):
+            questions = gap.get("questions", []) or []
+            if remaining <= 0:
+                gap["questions"] = []
+            else:
+                gap["questions"] = questions[:remaining]
+                remaining -= len(gap["questions"])
+            if gap.get("questions"):
+                trimmed_gaps.append(gap)
+        sections["skill_gaps"] = trimmed_gaps
+        
+        # Then keep skills_not_tested (1 question each)
+        if remaining > 0:
+            kept_not_tested = []
+            for item in sections.get("skills_not_tested", []):
+                if remaining <= 0:
+                    break
+                kept_not_tested.append(item)
+                remaining -= 1
+            sections["skills_not_tested"] = kept_not_tested
+        else:
+            sections["skills_not_tested"] = []
+        
+        # Finally keep verified skills acknowledgements (1 each)
+        if remaining > 0:
+            sections["verified_skills"] = sections.get("verified_skills", [])[:remaining]
+        else:
+            sections["verified_skills"] = []
     
     def _get_mock_agentic_response(
         self,
@@ -506,14 +746,15 @@ You must always respond with valid JSON only, no additional text or markdown."""
 ### Skill Gaps (Need deeper probing)
 {gaps_text}
 
-{f"## Job Description Context{chr(10)}{job_description}" if job_description else ""}
+{f"## Job Description Context{job_description}" if job_description else ""}
 
-{f"## Evaluation Notes from Simulation{chr(10)}{evaluation_rationale}" if evaluation_rationale else ""}
+{f"## Evaluation Notes from Simulation{evaluation_rationale}" if evaluation_rationale else ""}
 
 ## Your Task
 Generate exactly {num_questions} targeted interview questions that:
 1. Focus primarily on the skill gaps identified
 2. Are appropriate for {interview_type} interviews
+3. The questions should be based on the job description and the evaluation rationale.
 3. Help assess whether gaps are due to lack of knowledge, lack of experience, or just simulation performance
 4. Include follow-up questions to dig deeper
 5. Prioritize questions by the importance of the skill gap to the role

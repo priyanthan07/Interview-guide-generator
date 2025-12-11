@@ -1,30 +1,3 @@
----
-name: Agentic Pre-Interview Guide
-overview: Comprehensive implementation plan for an Agentic Pre-Interview Guide that uses chain-of-thought reasoning, properly leverages existing evaluation data, and provides recruiters with structured interview preparation.
-todos:
-  - id: add-job-desc-model
-    content: Add JobDescription model and create database table for storing job descriptions per campaign
-    status: cancelled
-  - id: add-campaign-endpoints
-    content: Create API endpoints for campaigns list, candidates by campaign, and job description CRUD
-    status: completed
-  - id: implement-agentic-prompt
-    content: Create new LLM prompt that generates chain-of-thought reasoning with evidence citations from actual data
-    status: completed
-  - id: create-campaign-dashboard
-    content: Build frontend campaign selector page with candidates table and bulk/individual generation options
-    status: completed
-  - id: create-jd-editor
-    content: Build job description editor with skill selection from skills_map
-    status: completed
-  - id: create-reasoning-ui
-    content: Build expandable reasoning sections and 3-part structured guide output
-    status: completed
-  - id: add-custom-instructions
-    content: Add custom instructions input that passes context to LLM for personalized generation
-    status: completed
----
-
 # Agentic Pre-Interview Guide - Complete Implementation Plan
 
 ## Database Structure Analysis (From Actual Data)
