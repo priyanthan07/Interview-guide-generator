@@ -422,7 +422,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000/api
 
 ## 🤝 Team
 
-Built for Skillfully Hackathon 2024 by **Gayaani & Team**
+Built for Skillfully Hackathon
 
 ## 📄 License
 

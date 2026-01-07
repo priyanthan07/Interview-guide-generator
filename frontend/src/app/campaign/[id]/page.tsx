@@ -689,7 +689,7 @@ export default function CampaignCandidatesPage() {
               </span>
             </div>
             <p className="text-sm text-slate-500">
-              Built by Gayaani & Team • Hackathon 2024
+              • Hackathon 2025
             </p>
           </div>
         </div>

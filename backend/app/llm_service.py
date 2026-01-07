@@ -445,7 +445,7 @@ You must always respond with valid JSON only, no additional text or markdown."""
         not_tested_text = self._format_not_tested_skills(skills_not_tested)
         existing_text = "\n".join([f"- {q}" for q in existing_questions]) if existing_questions else "None yet"
         
-        return f"""You are generating ADDITIONAL interview questions for a candidate.
+        return f"""You are generating ADDITIONAL interview questions for a candidate using chain-of-thought reasoning.
 
 ## CONTEXT
 - **Candidate**: {candidate_name}
@@ -470,6 +470,7 @@ Generate EXACTLY {needed} NEW interview questions that:
 2. Target the skill gaps or untested skills
 3. Use behavioral/situational format (STAR method)
 4. Include what to listen for, red flags, and follow-ups
+5. Include specific reasoning for why this question is important for THIS candidate
 
 Respond with valid JSON in this format:
 {{
@@ -477,6 +478,13 @@ Respond with valid JSON in this format:
         {{
             "skill_name": "The skill this question targets",
             "priority": "high/medium/low",
+            "reasoning": {{
+                "data_observation": "What specific gap or need this question addresses for this candidate",
+                "evidence_from_evaluation": "What evidence or context led to identifying this skill need",
+                "gap_significance": "Why this skill matters for the {role} role specifically",
+                "interview_strategy": "The approach for this question (behavioral/situational/technical)",
+                "question_rationale": "Why this specific question will reveal the candidate's capability"
+            }},
             "question": {{
                 "question": "The interview question text...",
                 "what_to_listen_for": ["indicator1", "indicator2", "indicator3"],
@@ -488,7 +496,7 @@ Respond with valid JSON in this format:
     ]
 }}
 
-Generate EXACTLY {needed} questions. No more, no less."""
+Generate EXACTLY {needed} questions with unique, specific reasoning for each. No more, no less."""
     
     def _extract_existing_questions(self, result: Dict[str, Any]) -> List[str]:
         """Extract all existing question texts from a guide result (excludes verified skill acknowledgments)."""
@@ -521,6 +529,7 @@ Generate EXACTLY {needed} questions. No more, no less."""
         for item in additional_questions:
             skill_name = item.get("skill_name", "General")
             question_data = item.get("question", {})
+            reasoning_data = item.get("reasoning", {})
             
             # Find existing gap with this skill name or create new one
             existing_gap = None
@@ -532,17 +541,17 @@ Generate EXACTLY {needed} questions. No more, no less."""
             if existing_gap:
                 existing_gap.setdefault("questions", []).append(question_data)
             else:
-                # Create new skill gap entry
+                # Create new skill gap entry with reasoning from LLM (or sensible defaults)
                 sections["skill_gaps"].append({
                     "skill_name": skill_name,
                     "current_score": 0,
                     "priority": item.get("priority", "medium"),
                     "reasoning": {
-                        "data_observation": "Additional probing question",
-                        "evidence_from_evaluation": "Generated to meet interview coverage requirements",
-                        "gap_significance": "Important for comprehensive assessment",
-                        "interview_strategy": "Behavioral assessment",
-                        "question_rationale": "Ensures thorough evaluation of candidate"
+                        "data_observation": reasoning_data.get("data_observation", f"Additional assessment needed for {skill_name}"),
+                        "evidence_from_evaluation": reasoning_data.get("evidence_from_evaluation", f"Skill gap identified based on job requirements for {skill_name}"),
+                        "gap_significance": reasoning_data.get("gap_significance", f"This skill is important for the role"),
+                        "interview_strategy": reasoning_data.get("interview_strategy", "Behavioral assessment using STAR method"),
+                        "question_rationale": reasoning_data.get("question_rationale", f"Designed to assess candidate's real-world capability in {skill_name}")
                     },
                     "questions": [question_data]
                 })

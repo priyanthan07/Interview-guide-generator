@@ -217,6 +217,25 @@ export interface AgenticGuideResponse {
   guides: AgenticGuideResult[];
 }
 
+// Streaming progress types
+export interface StreamingStep {
+  step: 'fetching_data' | 'classifying_skills' | 'building_context' | 'generating_questions' | 'validating_output';
+  message: string;
+  candidate_index: number;
+  progress: number;
+  details?: {
+    verified_skills_count?: number;
+    skill_gaps_count?: number;
+    skills_not_tested_count?: number;
+  };
+}
+
+export interface StreamingError {
+  session_id: string;
+  error: string;
+  candidate_index: number;
+}
+
 async function fetchAPI<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
@@ -285,4 +304,78 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(request),
     }),
+  
+  // Streaming Agentic Interview Guide Generation with progress updates
+  generateAgenticGuideStream: async (
+    request: AgenticGuideRequest,
+    onStep: (step: StreamingStep) => void,
+    onComplete: (result: AgenticGuideResponse) => void,
+    onError: (error: string) => void
+  ): Promise<void> => {
+    try {
+      const response = await fetch(`${API_BASE}/evaluations/generate-agentic-guide-stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(request),
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: 'An error occurred' }));
+        throw new Error(error.detail || `HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('ReadableStream not supported');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        
+        // Parse SSE events from buffer
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+        
+        let currentEvent = '';
+        let currentData = '';
+        
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.substring(7).trim();
+          } else if (line.startsWith('data: ')) {
+            currentData = line.substring(6);
+          } else if (line === '' && currentEvent && currentData) {
+            // End of event, process it
+            try {
+              const parsed = JSON.parse(currentData);
+              
+              if (currentEvent === 'step') {
+                onStep(parsed as StreamingStep);
+              } else if (currentEvent === 'complete') {
+                onComplete(parsed as AgenticGuideResponse);
+              } else if (currentEvent === 'error') {
+                onError((parsed as StreamingError).error);
+              }
+            } catch (parseError) {
+              console.error('Failed to parse SSE data:', parseError);
+            }
+            
+            currentEvent = '';
+            currentData = '';
+          }
+        }
+      }
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'Failed to connect to streaming endpoint');
+    }
+  },
 };

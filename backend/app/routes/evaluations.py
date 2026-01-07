@@ -1,11 +1,14 @@
 """Routes for fetching evaluation data from existing Skillfully database."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, distinct
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Generator
 from datetime import datetime
 from pydantic import BaseModel
+import json
+import asyncio
 
 from ..database import get_db
 from ..models_existing import Evaluation, EvaluationFeedback, EvaluationVoiceElsa, SkillsMap
@@ -228,6 +231,307 @@ def generate_agentic_guide(
         "candidates_processed": len(request.session_ids),
         "guides": results
     }
+
+
+# ============================================================================
+# Streaming Agentic Guide Generation Endpoint (SSE)
+# ============================================================================
+
+@router.post("/generate-agentic-guide-stream")
+async def generate_agentic_guide_stream(
+    request: AgenticGuideRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Generate agentic interview guides with real-time progress streaming via SSE.
+    
+    Emits events for each step:
+    - step: Current progress step with message
+    - complete: Final result with all generated guides
+    - error: Any errors that occurred
+    """
+    
+    def sse_event(event_type: str, data: dict) -> str:
+        """Format data as an SSE event."""
+        return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+    
+    def generate_events() -> Generator[str, None, None]:
+        """Generator that yields SSE events as processing progresses."""
+        results = []
+        total_candidates = len(request.session_ids)
+        
+        for idx, session_id in enumerate(request.session_ids):
+            candidate_num = idx + 1
+            
+            try:
+                # Step 1: Fetching data
+                yield sse_event("step", {
+                    "step": "fetching_data",
+                    "message": f"Fetching evaluation data for candidate {candidate_num}/{total_candidates}...",
+                    "candidate_index": idx,
+                    "progress": (idx * 5) / (total_candidates * 5) * 100
+                })
+                
+                # Get all evaluations for this session
+                evaluations = db.query(Evaluation).filter(
+                    Evaluation.session_id == session_id
+                ).all()
+                
+                if not evaluations:
+                    results.append({
+                        "session_id": session_id,
+                        "error": f"Session {session_id} not found",
+                        "success": False
+                    })
+                    continue
+                
+                # Step 2: Classifying skills
+                yield sse_event("step", {
+                    "step": "classifying_skills",
+                    "message": f"Classifying skills (verified/gaps/not tested) for candidate {candidate_num}/{total_candidates}...",
+                    "candidate_index": idx,
+                    "progress": (idx * 5 + 1) / (total_candidates * 5) * 100
+                })
+                
+                # Get additional data
+                feedback = db.query(EvaluationFeedback).filter(
+                    EvaluationFeedback.session_id == session_id
+                ).first()
+                
+                voice_eval = db.query(EvaluationVoiceElsa).filter(
+                    EvaluationVoiceElsa.session_id == session_id
+                ).first()
+                
+                first_eval = evaluations[0]
+                candidate_email = first_eval.email or "Candidate"
+                candidate_name = candidate_email.split('@')[0].replace('.', ' ').replace('_', ' ').title() if '@' in candidate_email else candidate_email
+                role = first_eval.scenario_name or first_eval.campaign_name or "Unknown Role"
+                scenario_type = first_eval.scenario_type
+                
+                # Auto-derive skills from evaluations if none provided
+                required_skills_list = list(request.required_skills)
+                if not required_skills_list:
+                    derived_skills = set()
+                    for eval in evaluations:
+                        if eval.skill:
+                            derived_skills.add(eval.skill)
+                    
+                    required_skills_list = [
+                        SkillRequirement(
+                            skill_name=skill,
+                            priority="medium",
+                            min_score=4
+                        )
+                        for skill in derived_skills
+                    ]
+                
+                # Build required skills lookup
+                required_skills_map = {s.skill_name.lower().replace('-', '_').replace(' ', '_'): s for s in required_skills_list}
+                
+                # Process evaluation results to classify skills
+                verified_skills = []
+                skill_gaps = []
+                skills_evaluated = []
+                evaluation_evidence = []
+                
+                for eval in evaluations:
+                    skill_name = eval.skill or "General Assessment"
+                    result = eval.result or {}
+                    transcript = eval.transcript
+                    
+                    score = None
+                    reason = None
+                    
+                    if isinstance(result, dict):
+                        score = result.get('score', result.get('overall_score', result.get('rating')))
+                        reason = result.get('reason', result.get('rationale', result.get('feedback', '')))
+                        
+                        if isinstance(score, str) and '/' in score:
+                            try:
+                                num, denom = score.split('/')
+                                score = float(num)
+                            except:
+                                score = 2.5
+                    
+                    if score is None:
+                        score = 2.5
+                    
+                    skill_key = skill_name.lower().replace('-', '_').replace(' ', '_')
+                    requirement = required_skills_map.get(skill_key)
+                    min_score = requirement.min_score if requirement else 4
+                    priority = requirement.priority if requirement else "medium"
+                    
+                    evidence = {
+                        "skill_name": skill_name,
+                        "score": score,
+                        "max_score": 5,
+                        "reason": reason,
+                        "scenario_type": scenario_type,
+                        "transcript_snippet": transcript[:300] if transcript else None,
+                        "is_required": requirement is not None,
+                        "priority": priority
+                    }
+                    evaluation_evidence.append(evidence)
+                    skills_evaluated.append(skill_name)
+                    
+                    if score >= min_score:
+                        verified_skills.append({
+                            "skill_name": skill_name,
+                            "score": score,
+                            "evidence": reason
+                        })
+                    else:
+                        gap_severity = "minor" if score >= 3 else "moderate" if score >= 2 else "significant"
+                        skill_gaps.append({
+                            "skill_name": skill_name,
+                            "current_score": score,
+                            "required_score": min_score,
+                            "gap_severity": gap_severity,
+                            "priority": priority,
+                            "evidence": reason,
+                            "transcript_snippet": transcript[:200] if transcript else None
+                        })
+                
+                # Identify skills NOT tested
+                skills_not_tested = []
+                evaluated_skill_keys = {s.lower().replace('-', '_').replace(' ', '_') for s in skills_evaluated}
+                
+                for req_skill in required_skills_list:
+                    skill_key = req_skill.skill_name.lower().replace('-', '_').replace(' ', '_')
+                    if skill_key not in evaluated_skill_keys:
+                        skills_not_tested.append({
+                            "skill_name": req_skill.skill_name,
+                            "priority": req_skill.priority,
+                            "reason": "This skill was not evaluated in the simulation"
+                        })
+                
+                # Step 3: Building context
+                yield sse_event("step", {
+                    "step": "building_context",
+                    "message": f"Building interview context for candidate {candidate_num}/{total_candidates}...",
+                    "candidate_index": idx,
+                    "progress": (idx * 5 + 2) / (total_candidates * 5) * 100,
+                    "details": {
+                        "verified_skills_count": len(verified_skills),
+                        "skill_gaps_count": len(skill_gaps),
+                        "skills_not_tested_count": len(skills_not_tested)
+                    }
+                })
+                
+                # Get feedback summary
+                feedback_summary = None
+                if feedback and feedback.feedback:
+                    if isinstance(feedback.feedback, dict):
+                        key_strengths = feedback.feedback.get('Key_Strengths', [])
+                        if key_strengths:
+                            feedback_summary = {
+                                "key_strengths": [
+                                    {"title": s.get('title'), "detail": s.get('strength')}
+                                    for s in key_strengths if isinstance(s, dict)
+                                ]
+                            }
+                
+                # Get voice evaluation summary
+                voice_summary = None
+                if voice_eval and voice_eval.elsa_score:
+                    voice_summary = {
+                        "elsa_score": voice_eval.elsa_score,
+                        "attributes": voice_eval.result.get('reasons', []) if voice_eval.result else []
+                    }
+                
+                # Combine instructions
+                combined_instructions = request.custom_instructions or ""
+                if request.per_candidate_instructions and session_id in request.per_candidate_instructions:
+                    candidate_instruction = request.per_candidate_instructions[session_id]
+                    if candidate_instruction:
+                        if combined_instructions:
+                            combined_instructions = f"{combined_instructions}\n\n[Candidate-Specific Instructions]: {candidate_instruction}"
+                        else:
+                            combined_instructions = f"[Candidate-Specific Instructions]: {candidate_instruction}"
+                
+                # Step 4: Generating questions with AI
+                yield sse_event("step", {
+                    "step": "generating_questions",
+                    "message": f"Generating interview questions with AI for candidate {candidate_num}/{total_candidates}...",
+                    "candidate_index": idx,
+                    "progress": (idx * 5 + 3) / (total_candidates * 5) * 100
+                })
+                
+                # Generate the guide using LLM
+                guide = llm_service.generate_agentic_guide(
+                    candidate_name=candidate_name,
+                    role=role,
+                    job_description=request.job_description,
+                    verified_skills=verified_skills,
+                    skill_gaps=skill_gaps,
+                    skills_not_tested=skills_not_tested,
+                    evaluation_evidence=evaluation_evidence,
+                    feedback_summary=feedback_summary,
+                    voice_summary=voice_summary,
+                    custom_instructions=combined_instructions if combined_instructions else None,
+                    num_questions=request.num_questions,
+                    scenario_type=scenario_type
+                )
+                
+                # Step 5: Finalizing
+                yield sse_event("step", {
+                    "step": "validating_output",
+                    "message": f"Validating and finalizing guide for candidate {candidate_num}/{total_candidates}...",
+                    "candidate_index": idx,
+                    "progress": (idx * 5 + 4) / (total_candidates * 5) * 100
+                })
+                
+                results.append({
+                    "session_id": session_id,
+                    "candidate_name": candidate_name,
+                    "candidate_email": candidate_email,
+                    "role": role,
+                    "scenario_type": scenario_type,
+                    "success": True,
+                    "classification": {
+                        "verified_skills": verified_skills,
+                        "skill_gaps": skill_gaps,
+                        "skills_not_tested": skills_not_tested
+                    },
+                    "guide": guide,
+                    "metadata": {
+                        "total_skills_evaluated": len(skills_evaluated),
+                        "feedback_available": feedback is not None,
+                        "voice_evaluation_available": voice_eval is not None,
+                        "custom_instructions_provided": bool(combined_instructions)
+                    }
+                })
+                
+            except Exception as e:
+                yield sse_event("error", {
+                    "session_id": session_id,
+                    "error": str(e),
+                    "candidate_index": idx
+                })
+                results.append({
+                    "session_id": session_id,
+                    "error": str(e),
+                    "success": False
+                })
+        
+        # Final complete event with all results
+        yield sse_event("complete", {
+            "generated_at": datetime.utcnow().isoformat(),
+            "job_description_provided": bool(request.job_description),
+            "required_skills_count": len(request.required_skills),
+            "candidates_processed": len(request.session_ids),
+            "guides": results
+        })
+    
+    return StreamingResponse(
+        generate_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
 
 
 def _generate_single_agentic_guide(

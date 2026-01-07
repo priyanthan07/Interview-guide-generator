@@ -35,7 +35,7 @@ import {
   TrendingDown
 } from 'lucide-react';
 import Link from 'next/link';
-import { api, AgenticGuideResponse, AgenticGuideResult, GapQuestion, SessionDetail } from '@/lib/api';
+import { api, AgenticGuideResponse, AgenticGuideResult, GapQuestion, SessionDetail, StreamingStep } from '@/lib/api';
 
 function GeneratePageContent() {
   const searchParams = useSearchParams();
@@ -97,6 +97,10 @@ function GeneratePageContent() {
   const [error, setError] = useState<string | null>(null);
   const [guideResponse, setGuideResponse] = useState<AgenticGuideResponse | null>(null);
   const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(new Set());
+  
+  // Streaming progress state
+  const [currentStep, setCurrentStep] = useState<StreamingStep | null>(null);
+  const [completedSteps, setCompletedSteps] = useState<string[]>([]);
 
   // Fetch session details for each candidate
   useEffect(() => {
@@ -185,17 +189,20 @@ function GeneratePageContent() {
 
     setLoading(true);
     setError(null);
+    setCurrentStep(null);
+    setCompletedSteps([]);
 
-    try {
-      // Convert Map to object for API
-      const perCandidateInstructionsObj: Record<string, string> = {};
-      candidateInstructions.forEach((value, key) => {
-        if (value.trim()) {
-          perCandidateInstructionsObj[key] = value;
-        }
-      });
-      
-      const response = await api.generateAgenticGuide({
+    // Convert Map to object for API
+    const perCandidateInstructionsObj: Record<string, string> = {};
+    candidateInstructions.forEach((value, key) => {
+      if (value.trim()) {
+        perCandidateInstructionsObj[key] = value;
+      }
+    });
+    
+    // Use streaming API for real-time progress updates
+    await api.generateAgenticGuideStream(
+      {
         session_ids: sessionIds,
         job_description: jobDescription,
         required_skills: [],
@@ -204,13 +211,32 @@ function GeneratePageContent() {
           ? perCandidateInstructionsObj 
           : undefined,
         num_questions: numQuestions
-      });
-      setGuideResponse(response);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate guide');
-    } finally {
-      setLoading(false);
-    }
+      },
+      // onStep callback - update progress
+      (step: StreamingStep) => {
+        setCurrentStep(step);
+        // Track completed steps for progress indicators
+        setCompletedSteps(prev => {
+          const stepId = `${step.candidate_index}-${step.step}`;
+          if (!prev.includes(stepId)) {
+            return [...prev, stepId];
+          }
+          return prev;
+        });
+      },
+      // onComplete callback - set final result
+      (result: AgenticGuideResponse) => {
+        setGuideResponse(result);
+        setLoading(false);
+        setCurrentStep(null);
+      },
+      // onError callback - handle errors
+      (errorMessage: string) => {
+        setError(errorMessage);
+        setLoading(false);
+        setCurrentStep(null);
+      }
+    );
   };
 
   const copyToClipboard = (text: string) => {
@@ -562,6 +588,108 @@ function GeneratePageContent() {
                 >
                   <X className="w-4 h-4 text-red-500" />
                 </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Progress Indicator - shown during generation */}
+          <AnimatePresence>
+            {loading && currentStep && (
+              <motion.div
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="card-premium p-6 mb-6"
+              >
+                <div className="flex items-center gap-4 mb-4">
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+                    <Loader2 className="w-6 h-6 animate-spin text-white" />
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="text-lg font-semibold text-slate-800">
+                      {currentStep.message}
+                    </h3>
+                    <p className="text-sm text-slate-500">
+                      Processing candidate {currentStep.candidate_index + 1} of {sessionIds.length}
+                    </p>
+                  </div>
+                </div>
+                
+                {/* Progress Bar */}
+                <div className="mb-4">
+                  <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                    <motion.div
+                      className="h-full bg-gradient-to-r from-indigo-500 to-purple-600"
+                      initial={{ width: 0 }}
+                      animate={{ width: `${currentStep.progress}%` }}
+                      transition={{ duration: 0.3 }}
+                    />
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1 text-right">
+                    {Math.round(currentStep.progress)}% complete
+                  </p>
+                </div>
+                
+                {/* Step Indicators */}
+                <div className="flex items-center justify-between gap-2">
+                  {[
+                    { id: 'fetching_data', label: 'Fetch Data', icon: FileText },
+                    { id: 'classifying_skills', label: 'Classify Skills', icon: Target },
+                    { id: 'building_context', label: 'Build Context', icon: Brain },
+                    { id: 'generating_questions', label: 'Generate Questions', icon: Sparkles },
+                    { id: 'validating_output', label: 'Finalize', icon: CheckCircle },
+                  ].map((step, idx) => {
+                    const isActive = currentStep.step === step.id;
+                    const isCompleted = completedSteps.includes(`${currentStep.candidate_index}-${step.id}`);
+                    const Icon = step.icon;
+                    
+                    return (
+                      <div key={step.id} className="flex flex-col items-center flex-1">
+                        <div
+                          className={`w-10 h-10 rounded-full flex items-center justify-center mb-1 transition-all duration-300 ${
+                            isActive
+                              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30 scale-110'
+                              : isCompleted
+                              ? 'bg-emerald-500 text-white'
+                              : 'bg-slate-200 text-slate-400'
+                          }`}
+                        >
+                          {isCompleted && !isActive ? (
+                            <CheckCircle className="w-5 h-5" />
+                          ) : (
+                            <Icon className={`w-5 h-5 ${isActive ? 'animate-pulse' : ''}`} />
+                          )}
+                        </div>
+                        <span className={`text-xs text-center ${
+                          isActive ? 'text-indigo-600 font-semibold' : 'text-slate-500'
+                        }`}>
+                          {step.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                
+                {/* Additional details when building context */}
+                {currentStep.details && currentStep.step === 'building_context' && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="mt-4 p-3 rounded-lg bg-slate-50 border border-slate-200"
+                  >
+                    <p className="text-xs text-slate-600">
+                      <span className="text-emerald-600 font-medium">
+                        {currentStep.details.verified_skills_count || 0}
+                      </span> verified skills • 
+                      <span className="text-amber-600 font-medium ml-1">
+                        {currentStep.details.skill_gaps_count || 0}
+                      </span> skill gaps • 
+                      <span className="text-slate-500 font-medium ml-1">
+                        {currentStep.details.skills_not_tested_count || 0}
+                      </span> not tested
+                    </p>
+                  </motion.div>
+                )}
               </motion.div>
             )}
           </AnimatePresence>

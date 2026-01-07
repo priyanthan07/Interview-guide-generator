@@ -316,28 +316,6 @@ export default function CampaignsPage() {
         </div>
       </main>
 
-      {/* Data Source Info */}
-      <section className="px-6 pb-8">
-        <div className="max-w-7xl mx-auto">
-          <div className="card-premium p-6 bg-blue-50/50 border-blue-200">
-            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
-              <RefreshCw className="w-5 h-5 text-blue-500" />
-              Data Source Information
-            </h3>
-            <div className="grid md:grid-cols-2 gap-4 text-sm">
-              <div>
-                <p className="text-slate-600"><strong>Campaign Name:</strong> From <code className="bg-slate-100 px-1 rounded">evaluation.campaign_name</code> column</p>
-                <p className="text-slate-600"><strong>Candidate Name:</strong> Derived from <code className="bg-slate-100 px-1 rounded">evaluation.email</code> (before @)</p>
-              </div>
-              <div>
-                <p className="text-slate-600"><strong>Session Count:</strong> <code className="bg-slate-100 px-1 rounded">COUNT(DISTINCT session_id)</code></p>
-                <p className="text-slate-600"><strong>Evaluation Count:</strong> <code className="bg-slate-100 px-1 rounded">COUNT(evaluation.id)</code> (total skill rows)</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
       {/* Footer */}
       <footer className="border-t border-slate-200/50 bg-white/50 backdrop-blur-sm">
         <div className="max-w-7xl mx-auto px-6 py-8">
@@ -351,7 +329,7 @@ export default function CampaignsPage() {
               </span>
             </div>
             <p className="text-sm text-slate-500">
-              Built by Gayaani & Team • Hackathon 2024
+              • Hackathon 2025
             </p>
           </div>
         </div>
